@@ -1,0 +1,551 @@
+---
+title: "Репликационное исследование"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(rms)
+library(stargazer)
+library(sjPlot)
+library(broom)
+library(emIRT)
+library(pscl)
+library(wnominate)
+library(scales)
+library(ggsignif)
+library(MASS)
+library(wordcloud)
+library(CBPS)
+library(MatchIt)
+library(optmatch)
+library(lmtest)
+library(performance) 
+library(zoo)
+library(lmtest)
+```
+
+```{r}
+#загрузка данных
+
+data <- read.csv("/Users/dmitry/Downloads/nahda.csv")
+data
+``` 
+
+```{r}
+#Рисунок 1. Fig 1 
+data %>%
+  group_by(art1a42) %>%
+  summarise(count = n()) %>%
+  mutate(percent = (count / sum(count) * 100)) %>%
+  arrange(desc(art1a42)) %>%
+  ggplot(aes(x = factor(art1a42), y = percent, fill = factor(art1a42))) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = scales::grey_pal()(4)) +
+  labs(
+    y = "Percent of Ennahda MPs",
+    title = "Distribution of Ennahda Votes\nRemoving Freedom of Conscience\n January 4, 2014"
+  ) +
+  theme_minimal() +
+  ylim(0, 60) +
+  geom_text(aes(label = round(percent, 0)), vjust = -0.5, position = position_dodge(width = 0.9))
+```
+
+```{r}
+#Рисунок 2. Fig 2
+data.summary <- data %>%
+  filter(Name != "Nsibi Farah" & Name != "Khalid Belhaj" & Name != "Nafti Mahdhi") %>%
+  group_by(div) %>%
+  summarise(
+    mean = mean(renom, na.rm = TRUE),
+    n = n(),
+    sd = sd(renom, na.rm = TRUE)
+  ) %>%
+  mutate(
+    sem = sd / sqrt(n),
+    me = qt(1 - 0.05 / 2, df = n) * sem
+  )
+
+ggplot(data.summary, aes(x = div, y = mean)) +  
+  geom_bar(position = position_dodge(), stat = "identity", fill = c(gray((1:2) / 3))) + 
+  geom_errorbar(aes(ymin = mean - me, ymax = mean + me, width = 0.3)) +
+  ggtitle("Likelihood of Renomination\nby Votes On Secularism") + 
+  theme_bw() + 
+  theme(panel.grid.major = element_blank()) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.5), oob = rescale_none) +
+  xlab("") +
+  theme(axis.text.x = element_text(size = 16)) +
+  theme(axis.title.y = element_text(size = 18)) +
+  theme(axis.text.y = element_text(size = 14)) +
+  theme(plot.title = element_text(size = 16, hjust = 0.5)) +
+  geom_text(aes(label = round(mean, 2)), position = position_dodge(width = 1), vjust = c(-3, -2.7), size = 8) +
+  geom_signif(stat = "identity",
+              data = data.frame(x = c(1.3), xend = c(1.7), y = c(0.9), annotation = c("**")),
+              aes(x = x, xend = xend, y = y, yend = y, annotation = annotation, group = c(1))) +
+  ylab("Likelihood of Renomination")
+```
+
+
+```{r}
+#Рисунок 3. Fig 3 
+data %>%
+  filter(art1a42 != "Absent") %>%
+  group_by(treat, sha) %>%
+  summarise(n = n()) %>%
+  mutate(percentage = n / sum(n) * 100) %>%
+  ggplot(aes(x = factor(treat), y = percentage, fill = factor(sha))) +
+  geom_bar(position = "dodge", stat = "identity", color = "black") +
+  geom_text(aes(label = sprintf("%.1f%%", percentage)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5, size = 3) +
+  scale_fill_manual(values = c("#CCCCCC", "#999999", "#666666")) +
+  labs(
+    y = "Percent of Ennahda MPs",
+    ylim = c(0, 100),
+    title = "Figure 3: Distribution of Ennahda Votes on Quran and Sunna"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 14),
+    axis.text.y = element_text(size = 14),
+    axis.title.y = element_text(size = 16),
+    plot.title = element_text(size = 18, hjust = 0.5)
+  )
+```
+
+```{r}
+#загружаем данные 
+
+votes <- read.csv("/Users/dmitry/Downloads/votes.csv", header=TRUE)
+output <- votes[1]
+votes$Name <- NULL
+votes
+```
+
+```{r}
+
+## Ordinal data with absent=0
+ordinal_abs <- apply(votes, 2, function(x) {x[x == "pour"] <- 3; x})
+ordinal_abs <- apply(ordinal_abs, 2, function(x) {x[x == "contre"] <- 1; x})
+ordinal_abs <- apply(ordinal_abs, 2, function(x) {x[x == "abstenu"] <- 2; x})
+ordinal_abs <- apply(ordinal_abs, 2, function(x) {x[x == ""] <- 0; x})
+ordinal_abs <- as.data.frame(ordinal_abs)
+ordinal_abs[,1:1731] <- apply(ordinal_abs[,1:1731], 2, function(x) as.numeric(as.character(x)))
+ordinal_abs <- as.matrix(ordinal_abs)
+
+
+test <- apply(ordinal_abs,2,function(x) {x[x == "0"] <- NA; x})
+test <- test[,colMeans(test, na.rm=TRUE)>1.46 & colMeans(test, na.rm=TRUE)<2.94] # trial and error to get maximum allowed #500
+test <- apply(test,2,function(x) {x[is.na(x)] <- 0; x})
+
+row.names(test) <- NULL 
+K <- ncol(test)
+J <- nrow(test)
+
+start.values <- list(alpha=matrix(rep(0,K),nrow=K,ncol=1),
+                     beta=matrix(runif(K,-1,1),nrow=K,ncol=1),
+                     x=matrix(runif(J,-4,4),nrow=J,ncol=1),
+                     DD=matrix(rep(0.5,K),nrow=K,ncol=1),
+                     tau=matrix(rep(-0.5,K),nrow=K,ncol=1))
+
+priors <- vector(mode = "list")
+priors$x <- list(mu = matrix(0,1,1), sigma = matrix(1,1,1) )
+priors$beta <- list(mu = matrix(0,2,1), sigma = matrix(diag(25,2),2,2))
+
+ord_abs <- ordIRT(.rc=test, .starts=start.values, .priors=priors)
+
+output["ordinal_abs_new"] <- ord_abs$means$x
+
+#################
+## DW-Nominate ##
+#################
+
+binary_abs <- apply(ordinal_abs,2,function(x) {x[x == "0"] <- NA; x})
+binary_abs <- apply(binary_abs,2, function(x) {x[x == "2" & mean(x, na.rm=TRUE)>=2] <- 1; x})
+binary_abs <- apply(binary_abs,2,function(x) {x[x == "2" & mean(x, na.rm=TRUE)<2] <- 3; x})
+binary_abs <- apply(binary_abs,2,function(x) {x[x == "1"] <- -1; x})
+binary_abs <- apply(binary_abs,2,function(x) {x[x == "3"] <- 1; x})
+binary_abs <- apply(binary_abs,2,function(x) {x[is.na(x)] <- 0; x})
+
+wbinary_abs <- apply(binary_abs,2,function(x) {x[x == "0"] <- NA; x})
+wbinary_abs <- apply(wbinary_abs,2,function(x) {x[x == "-1"] <- 0; x})
+wbinary_abs <- rollcall(wbinary_abs)
+wnom_fit2 <- wnominate(wbinary_abs, polarity=c(49,11), dims=2)
+
+output["dim1a_new"] <- wnom_fit2$legislators$coord1D
+
+
+
+## Party Discipline
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+disc <- ordinal_abs
+disc[disc==0] <- NA
+
+disc <- apply(disc,2,function(x) {x[x == Mode(x)] <- 0; x})
+disc <- apply(disc,2,function(x) {x[x != Mode(x)] <- 1; x})
+disc <- as.data.frame(disc)
+disc$sum <- rowSums(disc, na.rm=TRUE)
+disc$numvotes <- rowSums(!is.na(disc))
+disc$prop <- disc$sum/disc$numvotes
+output["prop_new"] <- disc$prop
+
+
+
+## merge ideal points into data
+data <- merge(data, output, by="Name", all.x=T)
+data$dim1a_new <- data$dim1a_new*-1
+data$ordinal_rev_new <- data$ordinal_abs_new
+data$ordinal_abs_new <- data$ordinal_abs_new*-1
+
+
+## Fig 4
+
+data <- data[order(data$ordinal_abs),]
+data$y <- seq(1,89,by=1)
+data$col <- ifelse(data$west==1, "blue",
+                   ifelse(data$nonwest==1, "darkgreen","red"))
+
+plot(x=data$ordinal_rev, y=data$y, type="n", yaxt='n', ylab="", xlab="Ideal Point", main="Ennahdha MPs, Constituent Assembly 2011-2014", xlim=c(-3.2,2.4))
+text(data$ordinal_rev,y=data$y,labels=data$Name, cex=0.6, col=data$col)
+legend(x=0.7,y=80,title="Experience (mean)\n",legend=c("Tunisia (-0.04)", "West (-0.48)", "MENA (0.56)"), title.col="Black", text.col=c("Red","Blue","Darkgreen"), cex=1, pch=NA, lty=FALSE, y.intersp=0.5)
+
+```
+
+```{r}
+#построение регрессионых моделей 
+one <- lm(ordinal_abs~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data)
+one
+```
+
+```{r}
+two <- lm(ordinal_abs~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+two
+```
+
+```{r}
+three <- lm(dim1a~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data)
+three
+```
+
+```{r}
+four <- lm(dim1a~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+four
+```
+
+#далее приведены Logistic Regression Model. 
+```{r}
+five <- lrm(as.factor(sha)~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data[data$art1a42!="Absent",])
+five 
+```
+
+```{r}
+#попытка преобразовать в glm. видим, что знаки коэффициентов одинаковы, но значения различаются
+five_p <- glm(as.factor(sha) ~ westlength2sd + nonwestlength2sd + female + age_norm + edu + theo + job + hometown2, 
+            family = binomial(), 
+            data = filter(data, art1a42 != "Absent"))
+summary(five_p)
+```
+
+```{r}
+six <- lrm(as.factor(sha)~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data[data$art1a42!="Absent",])
+six
+```
+
+```{r}
+seven <- lrm(as.factor(ath)~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data[data$art6a62!="Absent",])
+seven
+```
+
+```{r}
+eight <- lrm(as.factor(ath)~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data[data$art6a62!="Absent",])
+eight
+```
+
+```{r}
+nine <- lrm(as.factor(tak)~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data[data$art6takfir!="Absent",])
+nine
+```
+
+```{r}
+ten <- lrm(as.factor(tak)~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data[data$art6takfir!= "Absent",])
+ten
+```
+
+```{r}
+eleven <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2), data=data)
+eleven
+```
+
+```{r}
+twelve <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+twelve
+```
+
+регрессионные таблицы, пакет stargazer. в загрузках открывайте документ html с помощью word 
+```{r}
+#Table 1: Secular Diffusion and Individual Secularism Votes
+table_1_labels <- c("West (time)", "MENA (time)", "Female", "Age", "Education", "Theology degree")
+
+table_1_omit <- c("y>=0", "y>=1", "job=Doctor", "job=Government", "job=Lawyer", "job=None", "job=Other", "job=Professor", "job=Scientist", "job=Teacher", "hometown2=North", "hometown2=Sahel", "hometown2=SE", "hometown2=South", "hometown2=Tunis", "int", "jobDoctor", "jobGovernment", "jobLawyer", "jobNone", "jobOther", "jobProfessor", "jobScientist", "jobTeacher", "hometown2North", "hometown2Sahel", "hometown2SE", "hometown2South", "hometown2Tunis")
+
+stargazer(five, six, seven, eight, nine, ten, eleven, twelve, type ="html", title="Secular Diffusion and Individual Secularism Votes", style="ajps", omit=table_1_omit, covariate.labels=table_1_labels, column.sep.width="1pt", out="table111.htm")
+cbind(AIC(five), AIC(six), AIC(seven), AIC(eight), AIC(nine), AIC(ten), AIC(eleven), AIC(twelve))
+```
+
+```{r}
+## Table 2: Secular Diffusion Among Ennahdha MPs (OLS)
+table_2_labels <- c("West (time)", "MENA (time)", "Female", "Age", "Education", "Theology degree", "Prison")
+
+table_2_omit <- c("y>=0", "y>=1", "job=Doctor", "job=Government", "job=Lawyer", "job=None", "job=Other", "job=Professor", "job=Scientist", "job=Teacher", "hometown2=North", "hometown2=Sahel", "hometown2=SE", "hometown2=South", "hometown2=Tunis", "int", "jobDoctor", "jobGovernment", "jobLawyer", "jobNone", "jobOther", "jobProfessor", "jobScientist", "jobTeacher", "hometown2North", "hometown2Sahel", "hometown2SE", "hometown2South", "hometown2Tunis")
+
+stargazer(one, two, three, four, type="html", title="Secular Diffusion among Ennahda MPs (OLS)", out="table222.htm", style="ajps", column.sep.width="1pt", omit=table_2_omit, covariate.labels=table_2_labels)
+cbind(AIC(one), AIC(two), AIC(three), AIC(four))
+```
+
+```{r}
+## Table 3: Covariate Balance among Ennahdha MPs
+
+table(data$treat)
+tapply(data$Age, data$treat, mean, na.rm=T)
+tapply(data$female, data$treat, mean, na.rm=T)
+tapply(data$edu==1, data$treat, mean, na.rm=T)
+tapply(data$job=="Teacher" | data$job=="Professor", data$treat, mean, na.rm=T)
+tapply(data$job=="None", data$treat, mean, na.rm=T)
+
+mean(data$nahda1989, na.rm=T)
+tapply(data$nahda1989, data$treat, mean, na.rm=T)
+mean(data$mosque09pc)
+tapply(data$mosque09pc, data$treat, mean, na.rm=T)
+
+## Table 3 good looking
+tunisia_data <- subset(data, treat == "Tunisia")
+west_data <- subset(data, treat == "West")
+mena_data <- subset(data, treat == "MENA")
+
+data_list <- list(tunisia_data, west_data, mena_data, data)
+
+means_list <- lapply(data_list, function(subdata) {
+  c(
+    N = nrow(subdata),
+    Av_Age = mean(subdata$Age, na.rm = TRUE),
+    Percent_Female = mean(subdata$female, na.rm = TRUE) * 100,
+    Percent_BA = mean(subdata$edu == 1, na.rm = TRUE) * 100,
+    Percent_Teacher = mean(subdata$job == "Teacher" | subdata$job == "Professor", na.rm = TRUE) * 100,
+    Percent_Coast = mean(subdata$job == "None", na.rm = TRUE) * 100,
+    Percent_1989_elex = mean(subdata$nahda1989, na.rm = TRUE) * 100,
+    Av_Mosques = mean(subdata$mosque09pc, na.rm = TRUE)
+  )
+})
+
+result_table <- data.frame(do.call(rbind, means_list))
+
+rownames(result_table) <- c("Tunisia", "West", "MENA", "Total")
+stargazer(result_table, type = "html", summary = FALSE, out="table333.htm")
+```
+
+```{r}
+#можно преобразовать таблицу 3 в соответствии с tidyverse форматом 
+result_table <- data %>%
+  group_by(treat) %>%
+  summarise(
+    N = n(),
+    Av_Age = mean(Age, na.rm = TRUE),
+    Percent_Female = mean(female, na.rm = TRUE) * 100,
+    Percent_BA = mean(edu == 1, na.rm = TRUE) * 100,
+    Percent_Teacher = mean(job %in% c("Teacher", "Professor"), na.rm = TRUE) * 100,
+    Percent_Coast = mean(job == "None", na.rm = TRUE) * 100,
+    Percent_1989_elex = mean(nahda1989, na.rm = TRUE) * 100,
+    Av_Mosques = mean(mosque09pc, na.rm = TRUE)
+  )
+
+total_row <- data %>%
+  summarise(
+    N = n(),
+    Av_Age = mean(Age, na.rm = TRUE),
+    Percent_Female = mean(female, na.rm = TRUE) * 100,
+    Percent_BA = mean(edu == 1, na.rm = TRUE) * 100,
+    Percent_Teacher = mean(job %in% c("Teacher", "Professor"), na.rm = TRUE) * 100,
+    Percent_Coast = mean(job == "None", na.rm = TRUE) * 100,
+    Percent_1989_elex = mean(nahda1989, na.rm = TRUE) * 100,
+    Av_Mosques = mean(mosque09pc, na.rm = TRUE)
+  ) %>%
+  mutate(treat = "Total")
+
+result_table <- bind_rows(result_table, total_row)
+result_table
+```
+
+
+#Предсказанные значения
+#например, для второй модели 
+```{r}
+two <- lm(ordinal_abs ~ westlength2sd + nonwestlength2sd + female + age_norm + edu + theo + (job) + (hometown2) + int + jail + region2 + Votenorm + CPRnorm + list, data = data)
+
+two_predict <- expand.grid(
+  westlength2sd = seq(min(data$westlength2sd, na.rm = TRUE),
+                      max(data$westlength2sd, na.rm = TRUE), length.out = 10),
+  nonwestlength2sd = mean(data$nonwestlength2sd, na.rm = TRUE),
+  female = unique(data$female)[1],
+  age_norm = mean(data$age_norm, na.rm = TRUE),
+  edu = unique(data$edu)[1],
+  theo = unique(data$theo)[1],
+  job = unique(data$job)[1],  
+  hometown2 = unique(data$hometown2)[1],  
+  int = mean(data$int, na.rm = TRUE),  
+  jail = unique(data$jail)[1],
+  region2 = unique(data$region2)[1],
+  Votenorm = mean(data$Votenorm, na.rm = TRUE), 
+  CPRnorm = mean(data$CPRnorm, na.rm = TRUE),  
+  list = unique(data$list)[1])
+
+two_predict$pred <- predict(two, two_predict)
+
+ggplot(two_predict, aes(westlength2sd, pred)) +
+  geom_point() +
+  geom_line() +
+  labs(y = "Предсказанные значения ",
+       x = "westlength2sd",
+       title = "Предсказанные значения для 2 модели") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5))
+
+```
+
+
+#Диагоностика моделей 
+Модель №1 
+1) нормальность распределения остатков 
+```{r}
+one <- lm(ordinal_abs~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data)
+check_normality(one) %/% #OK: residuals appear as normally distributed (p = 0.148).
+plot(one) #результаты лежат вдоль линии 
+```
+
+2) тест Бройша-Пагана на гомоскедастичность 
+```{r}
+library(lmtest)
+
+# Ваша модель линейной регрессии
+one <- lm(ordinal_abs ~ westlength2sd + nonwestlength2sd + female + age_norm + edu + theo + (job) + (hometown2), data = data)
+
+bptest_result <- bptest(one)
+bptest_result   #-значение больше 0.05, не отклоненяем нулевую гипотезу о гомоскедастичности. остатки модели обладают гомоскедастичностью, нет необходимости корректировать для гетероскедастичности в данной модели
+```
+
+3) общее 
+```{r}
+one <- lm(ordinal_abs ~ westlength2sd + nonwestlength2sd + female + age_norm + edu + theo + (job) + (hometown2), data = data)
+check_model(one) 
+```
+
+```{r}
+one <- lm(ordinal_abs~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data)
+plot(one)
+```
+
+Модель №2
+1) нормальность распределения остатков
+```{r}
+two <- lm(ordinal_abs~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+check_normality(two)  %/% #OK: residuals appear as normally distributed (p = 0.791) 
+plot(two)
+```
+
+2) тест Бройша-Пагана на гомоскедастичность 
+```{r}
+two <- lm(ordinal_abs~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+bptest_result <- bptest(two)
+bptest_result   #остатки модели two обладают гомоскедастичностью
+```
+
+3) общее 
+```{r}
+two <- lm(ordinal_abs~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+check_model(two)
+```
+
+Модель №3
+1) нормальность распределения остатков
+```{r}
+three <- lm(dim1a~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data)
+check_normality(three) %/% #OK: residuals appear as normally distributed (p = 0.192)
+plot(three)
+```
+2) тест Бройша-Пагана на гомоскедастичность
+```{r}
+three <- lm(dim1a~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data)
+bptest_result <- bptest(three)
+bptest_result   #p-значение лишь немного ниже уровня значимости 0.05 
+```
+3) общее 
+```{r}
+three <- lm(dim1a~westlength2sd+nonwestlength2sd+female+age_norm+edu+theo+(job)+(hometown2), data=data)
+check_model(three)
+```
+
+Модель №4
+1) нормальность распределения остатков
+```{r}
+four <- lm(dim1a~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+check_normality(four) %/% #OK: residuals appear as normally distributed (p = 0.587)
+plot(four)
+```
+2) тест Бройша-Пагана на гомоскедастичность
+```{r}
+four <- lm(dim1a~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+bptest_result <- bptest(four)
+bptest_result   #остатки модели four обладают гомоскедастичностью
+```
+3) общее 
+```{r}
+four <- lm(dim1a~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+check_model(four)
+```
+
+Модель №11
+1) нормальность распределения остатков
+```{r}
+eleven <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2), data=data)
+check_normality(eleven) %/% #OK: residuals appear as normally distributed (p = 0.878)
+plot(eleven)
+```
+
+2) тест Бройша-Пагана на гомоскедастичность
+```{r}
+eleven <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2), data=data)
+bptest_result <- bptest(eleven)
+bptest_result   #остатки модели eleven обладают гомоскедастичностью
+```
+3) общее 
+```{r}
+eleven <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2), data=data)
+check_model(eleven)
+```
+
+Модель №12
+1) нормальность распределения остатков
+```{r}
+twelve <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+check_normality(twelve) #OK: residuals appear as normally distributed (p = 0.413)
+plot(twelve)
+```
+2) тест Бройша-Пагана на гомоскедастичность
+```{r}
+twelve <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+bptest_result <- bptest(twelve)
+bptest_result   #остатки модели twelve обладают гомоскедастичностью
+```
+3) общее 
+```{r}
+twelve <- lm(pca_sec~westlength2sd+nonwestlength2sd++female+age_norm+edu+theo+(job)+(hometown2)+int+jail+region2+Votenorm+CPRnorm+list, data=data)
+check_model(twelve)
+```
+
